@@ -349,8 +349,8 @@ Title: `[Task] Back-end Testing`
    The output should be similar to this:
 
    ```terminal
-   FAILED backend/tests/e2e/test_interactions.py::test_get_interactions_returns_200 - AssertionError: assert 500 == 200
-   FAILED backend/tests/e2e/test_interactions.py::test_get_interactions_response_is_a_list - ...
+   FAILED backend/tests/e2e/test_interactions.py::test_get_interactions_returns_200 - assert 500 == 200
+   FAILED backend/tests/e2e/test_interactions.py::test_get_interactions_response_is_a_list - json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
    ```
 
    The `500` status code means the server encountered an internal error while building the response.
