@@ -508,6 +508,13 @@ def run_agent(question: str) -> dict[str, Any]:
             }
 
         # Process tool calls
+        # First, append the assistant message with all tool calls
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        })
+
         for tool_call in tool_calls:
             if tool_call_count >= MAX_TOOL_CALLS:
                 break

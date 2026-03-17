@@ -82,3 +82,29 @@ Then iterate:
 - **Iteration strategy**:
   - When credentials are available, run `uv run run_eval.py` once to get the first failing question.
   - Fix one failure at a time (tool usage, prompt steering, or tool implementation), then rerun with `--index N` for fast feedback.
+
+### Benchmark iteration log
+
+1. **Issue**: Agent exited with code 1 for all questions
+   - **Cause**: `.env.agent.secret` had placeholder values (`<qwen-api-port>`)
+   - **Fix**: Set up Qwen Code API on VM and configured `.env.agent.secret` with:
+     - `LLM_API_BASE=http://localhost:42005/v1`
+     - `LLM_API_KEY=123456789`
+     - `LLM_MODEL=coder-model`
+
+2. **Issue**: LLM returned 500 error after first tool call
+   - **Cause**: Agent was not appending the assistant message with `tool_calls` before the tool response message
+   - **Fix**: Added `messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})` before appending tool results
+
+3. **Issue**: `qwen3-coder-plus` and `qwen3-coder-flash` models didn't support function calling well
+   - **Cause**: These models output tool calls as text content instead of using `tool_calls` field
+   - **Fix**: Changed to `coder-model` which properly supports function calling
+
+4. **Verified working questions**:
+   - ✅ "What is 2+2?" → Returns correct answer
+   - ✅ "What files are in the backend directory?" → Uses `list_files`, returns answer
+   - ✅ "What Python web framework does this project use?" → Uses `list_files` + `read_file`, returns "FastAPI" with source
+   - ✅ "According to the project wiki, what steps are needed to protect a branch?" → Uses `list_files` + `read_file`, returns detailed steps
+   - ✅ "What HTTP status code does /items/ return without auth?" → Uses `query_api` with `auth=false`, reads source code, returns "401"
+
+5. **Known limitation**: Questions requiring a running backend API (item count, completion-rate) will work when the autochecker runs with its backend, but fail locally because the backend is not running.
