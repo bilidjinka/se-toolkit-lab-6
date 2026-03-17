@@ -2,7 +2,7 @@
 """Documentation agent that calls an LLM with function calling support.
 
 This script provides a CLI interface to query an LLM (Qwen Code API)
-with tool support for list_files and read_file operations.
+with tool support for list_files, read_file, and query_api operations.
 """
 
 import json
@@ -49,6 +49,14 @@ def ensure_env_vars() -> None:
     for key in ("LLM_API_BASE", "LLM_API_KEY", "LLM_MODEL"):
         if key not in os.environ and key in file_env:
             os.environ[key] = file_env[key]
+
+    # Also load LMS_API_KEY and AGENT_API_BASE_URL from .env.docker.secret
+    docker_env_path = Path(__file__).parent / ".env.docker.secret"
+    docker_env = load_env_from_file(docker_env_path)
+
+    for key in ("LMS_API_KEY", "AGENT_API_BASE_URL"):
+        if key not in os.environ and key in docker_env:
+            os.environ[key] = docker_env[key]
 
 
 def validate_env_vars() -> None:
@@ -185,10 +193,68 @@ def tool_read_file(args: dict[str, Any]) -> str:
         return f"Error: {e}"
 
 
+def tool_query_api(args: dict[str, Any]) -> str:
+    """Query the backend API.
+
+    Args:
+        args: Dictionary with 'method', 'path', and optional 'body' and 'auth' keys.
+
+    Returns:
+        JSON string with status_code and body, or an error string.
+    """
+    method = args.get("method", "GET").upper()
+    path = args.get("path", "")
+    body_str = args.get("body")
+    use_auth = args.get("auth", True)
+
+    if not path:
+        return json.dumps({"error": "Missing 'path' parameter"})
+
+    # Get API base URL from environment, default to localhost
+    api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+    lms_api_key = os.environ.get("LMS_API_KEY", "")
+
+    url = f"{api_base}{path}"
+
+    headers = {}
+    if use_auth and lms_api_key:
+        headers["Authorization"] = f"Bearer {lms_api_key}"
+    headers["Content-Type"] = "application/json"
+
+    # Parse body if provided
+    json_body = None
+    if body_str:
+        try:
+            json_body = json.loads(body_str)
+        except json.JSONDecodeError:
+            return json.dumps({"error": "Invalid JSON in body parameter"})
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.request(method, url, headers=headers, json=json_body)
+            result = {
+                "status_code": response.status_code,
+                "body": response.text,
+            }
+            # Try to parse body as JSON
+            try:
+                result["body"] = response.json()
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return json.dumps(result)
+    except httpx.TimeoutException:
+        return json.dumps({"error": "Request timed out"})
+    except httpx.RequestError as e:
+        return json.dumps({"error": f"Request failed: {e}"})
+    except Exception as e:
+        return json.dumps({"error": f"Unexpected error: {e}"})
+
+
 # Map of tool names to implementations
 TOOLS_IMPL: dict[str, callable] = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
+    "query_api": tool_query_api,
 }
 
 
@@ -199,13 +265,13 @@ def get_tool_schemas() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "list_files",
-                "description": "List files and directories in a given path within the repository.",
+                "description": "List files and directories in a given path within the repository. Use this to discover wiki documentation files or backend source code structure.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path to a directory (e.g., 'wiki' or 'wiki/subdir').",
+                            "description": "Relative path to a directory (e.g., 'wiki', 'backend/app/routers').",
                         }
                     },
                     "required": ["path"],
@@ -216,16 +282,45 @@ def get_tool_schemas() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file within the repository.",
+                "description": "Read the contents of a file within the repository. Use this to read wiki documentation for conceptual questions or backend source code for implementation details.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path to a file (e.g., 'wiki/git.md').",
+                            "description": "Relative path to a file (e.g., 'wiki/git.md', 'backend/app/main.py').",
                         }
                     },
                     "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": "Query the running backend API to get live system data, item counts, analytics, or test authentication behavior. Use this for data-dependent questions (counts, scores) or to check HTTP status codes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method (GET, POST, etc.). Default: GET",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate').",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "JSON string for request body (optional, for POST/PUT).",
+                        },
+                        "auth": {
+                            "type": "boolean",
+                            "description": "Whether to send authentication header. Default: true. Set to false to test unauthenticated access.",
+                        },
+                    },
+                    "required": ["method", "path"],
                 },
             },
         },
@@ -333,13 +428,25 @@ def run_agent(question: str) -> dict[str, Any]:
     """
     # Build initial messages
     system_prompt = (
-        "You are a documentation agent that helps answer questions by reading files from the wiki.\n"
-        "Use the available tools to discover and read relevant documentation.\n"
+        "You are a documentation and system agent that helps answer questions about this software engineering project.\n"
+        "You have three tools available:\n"
+        "- list_files: Discover files in directories like 'wiki/' for documentation or 'backend/' for source code.\n"
+        "- read_file: Read file contents to find answers in documentation or source code.\n"
+        "- query_api: Query the running backend API for live data (item counts, analytics) or to test HTTP behavior.\n"
+        "\n"
+        "Tool selection guide:\n"
+        "- Wiki/documentation questions → use list_files on 'wiki/', then read_file on relevant .md files.\n"
+        "- Backend implementation questions → use list_files on 'backend/app/', then read_file on relevant .py files.\n"
+        "- Live data questions (counts, scores, analytics) → use query_api.\n"
+        "- HTTP status code questions → use query_api (set auth=false to test unauthenticated access).\n"
+        "- Bug diagnosis questions → use query_api to reproduce the error, then read_file on the failing source code.\n"
+        "\n"
         "When you have enough information, respond with a JSON object containing:\n"
-        "- 'answer': Your answer to the question\n"
-        "- 'source': The file path and section anchor (e.g., 'wiki/git.md#merge-conflict')\n"
-        "Always prefer using list_files to discover wiki files, then read_file to get content.\n"
-        "Include the source field with the file path and a section anchor if applicable."
+        "- 'answer': Your answer to the question (be specific and include relevant details)\n"
+        "- 'source': The file path and optional section anchor (e.g., 'wiki/git.md#merge-conflict' or 'backend/app/main.py')\n"
+        "For wiki questions, include the wiki file path in source.\n"
+        "For source code questions, include the backend file path in source.\n"
+        "For API data questions, source is optional."
     )
 
     messages: list[dict[str, Any]] = [
@@ -376,12 +483,12 @@ def run_agent(question: str) -> dict[str, Any]:
                 "error": "Unexpected response format",
             }
 
-        # Check for tool calls
-        tool_calls = assistant_message.get("tool_calls", [])
+        # Check for tool calls - handle content being None
+        tool_calls = assistant_message.get("tool_calls") or []
+        content = assistant_message.get("content") or ""
 
         if not tool_calls:
             # No tool calls - extract final answer
-            content = assistant_message.get("content", "")
             if not content:
                 content = "No answer provided by the model."
 
